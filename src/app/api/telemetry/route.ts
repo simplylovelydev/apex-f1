@@ -329,7 +329,7 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 4. Session-Wide OpenF1 Data (Cached 30s live / 5m off-week) + Single-Driver Car Telemetry
+  // 4. Session-Wide OpenF1 Data (Cached 25s live / 5m off-week) + Single-Driver Car Telemetry
   let standings: DriverTimingRow[] = [];
   let telemetry = null;
   let realCarLocations: Array<{ driverNumber: number; x: number; y: number }> =
@@ -407,7 +407,7 @@ export async function GET(req: NextRequest) {
                 name_acronym: string;
                 full_name: string;
                 team_name: string;
-              }) => {
+              }): DriverTimingRow => {
                 const teamId = resolveTeamId(d.team_name);
                 const pos = latestPos.get(d.driver_number) ?? 99;
                 const iv = latestIv.get(d.driver_number);
@@ -435,9 +435,10 @@ export async function GET(req: NextRequest) {
                       ? `+${Number(iv.interval).toFixed(3)}`
                       : "—",
                   lastLap: "OFFICIAL",
-                  sector1Color: pos === 1 ? "purple" : "green",
-                  sector2Color: "green",
-                  sector3Color: "green",
+                  sector1Color:
+                    pos === 1 ? ("purple" as const) : ("green" as const),
+                  sector2Color: "green" as const,
+                  sector3Color: "green" as const,
                   tyre: (["SOFT", "MEDIUM", "HARD", "INTER", "WET"].includes(
                     compound
                   )
@@ -481,7 +482,7 @@ export async function GET(req: NextRequest) {
         rcSamples = Array.isArray(fetchedRc) ? fetchedRc : [];
         radioSamples = Array.isArray(fetchedRadio) ? fetchedRadio : [];
 
-        // Only cache if we actually received valid driver rows (prevents caching 429 empty responses)
+        // Only cache if we received valid driver rows (prevents caching 429 empty responses)
         if (standings.length > 0) {
           SESSION_CACHE.set(sk, {
             expiresAt: now + sessionTtl,
