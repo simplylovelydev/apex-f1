@@ -51,6 +51,13 @@ export function LandingHero({
     }
   }, [user, step]);
 
+  // Reset onboarding back to Hero stage whenever user signs out
+  useEffect(() => {
+    if (authReady && !user && step === "team") {
+      setStep("hero");
+    }
+  }, [authReady, user, step]);
+
   const handleEnterClick = () => {
     if (user) {
       setStep("team");

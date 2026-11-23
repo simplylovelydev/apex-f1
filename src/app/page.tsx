@@ -80,7 +80,7 @@ export default function HomePage() {
   const [feedStatus, setFeedStatus] = useState("SYNCING");
   const [gapMode, setGapMode] = useState<"interval" | "leader">("interval");
 
-  // Listen to Supabase Google Auth session & restore saved constructor allegiance
+  // Listen to Supabase Google Auth session, restore constructor allegiance & return to Hero on logout
   useEffect(() => {
     if (!supabase) {
       setAuthReady(true);
@@ -101,15 +101,22 @@ export default function HomePage() {
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       const activeUser = session?.user ?? null;
       setUser(activeUser);
       setAuthReady(true);
-      if (activeUser) {
-        const savedTeam = await syncUserProfile(activeUser);
-        if (savedTeam && F1_TEAMS[savedTeam]) {
-          setSupportedTeam(savedTeam);
+
+      if (event === "SIGNED_OUT" || !activeUser) {
+        if (typeof window !== "undefined") {
+          sessionStorage.removeItem("apex_onboarding_step");
         }
+        setHasEnteredPitwall(false);
+        return;
+      }
+
+      const savedTeam = await syncUserProfile(activeUser);
+      if (savedTeam && F1_TEAMS[savedTeam]) {
+        setSupportedTeam(savedTeam);
       }
     });
 
