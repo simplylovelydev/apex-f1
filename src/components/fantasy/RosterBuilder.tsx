@@ -26,6 +26,7 @@ import { DriverAvatar, TeamLogo } from "@/components/broadcast/F1Media";
 
 interface RosterBuilderProps {
   user: User | null;
+  onPointsUpdated?: (points: number) => void;
 }
 
 type PowerUnitId =
@@ -213,7 +214,7 @@ export function FantasyLogoBadge({
   );
 }
 
-export function RosterBuilder({ user }: RosterBuilderProps) {
+export function RosterBuilder({ user, onPointsUpdated }: RosterBuilderProps) {
   const [activeSubTab, setActiveSubTab] = useState<
     "lineup" | "leaderboard" | "profile"
   >("lineup");
@@ -267,6 +268,7 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
     setTurboDriver(locked.turboDriver);
   };
 
+  // Supabase is the single source of truth across localhost & Vercel
   const loadFantasyData = async () => {
     setLoadingData(true);
     if (!supabase) {
@@ -313,18 +315,30 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
           setDisplayNameInput(loadedProf.displayName);
           setTeamNameInput(loadedProf.teamName);
           setSelectedLogo(loadedProf.logoUrl);
+          onPointsUpdated?.(loadedProf.totalPoints);
         } else {
           setProfile(null);
+          onPointsUpdated?.(0);
         }
 
-        // Check Supabase first, then localStorage fallback
-        const { data: myRoster } = await supabase
+        // Fetch locked roster exclusively from Supabase DB
+        const { data: myRoster, error: rosterReadErr } = await supabase
           .from("fantasy_rosters")
           .select("*")
           .eq("user_id", user.id)
           .maybeSingle();
 
-        if (myRoster && Array.isArray(myRoster.driver_numbers) && myRoster.driver_numbers.length === 3) {
+        if (rosterReadErr) {
+          setRosterError(
+            `DB READ ERROR: ${rosterReadErr.message.toUpperCase()}`
+          );
+        }
+
+        if (
+          myRoster &&
+          Array.isArray(myRoster.driver_numbers) &&
+          myRoster.driver_numbers.length === 3
+        ) {
           const ctorList = (myRoster.constructor_ids || []) as ConstructorId[];
           const puId = (myRoster.power_unit_id || "mercedes_hpp") as PowerUnitId;
           const locked: LockedRoster = {
@@ -335,20 +349,16 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
             isLocked: true,
           };
           applyLockedState(locked);
+        } else {
+          // Clear any stale localStorage so localhost and Vercel stay 100% synced with DB
           if (typeof window !== "undefined") {
-            localStorage.setItem(
-              `apex_locked_roster_${user.id}`,
-              JSON.stringify(locked)
-            );
+            localStorage.removeItem(`apex_locked_roster_${user.id}`);
           }
-        } else if (typeof window !== "undefined") {
-          const localRaw = localStorage.getItem(`apex_locked_roster_${user.id}`);
-          if (localRaw) {
-            const parsed: LockedRoster = JSON.parse(localRaw);
-            applyLockedState({ ...parsed, isLocked: true });
-          } else {
-            setLockedRoster(null);
-          }
+          setLockedRoster(null);
+          setSelectedDrivers([]);
+          setSelectedConstructor(null);
+          setSelectedPowerUnit(null);
+          setTurboDriver(null);
         }
       }
     } finally {
@@ -448,7 +458,7 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
       }
 
       await loadFantasyData();
-      setProfileSuccess("FANTASY IDENTITY SAVED.");
+      setProfileSuccess("FANTASY IDENTITY SAVED TO DATABASE.");
     } finally {
       setSavingProfile(false);
     }
@@ -605,9 +615,10 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
     simScenario,
   ]);
 
+  // Save Locked Lineup directly into Supabase DB (so localhost & deployed site match)
   const handleLockRoster = async () => {
     setRosterError(null);
-    if (!user) {
+    if (!user || !supabase) {
       setRosterError("PLEASE SIGN IN WITH GOOGLE FIRST.");
       return;
     }
@@ -625,89 +636,77 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
     }
 
     setLockingRoster(true);
-    const newLocked: LockedRoster = {
-      driverNumbers: selectedDrivers,
-      constructorIds: [selectedConstructor],
-      powerUnitId: selectedPowerUnit,
-      turboDriver,
-      isLocked: true,
-    };
-
     try {
-      // 1. Immediately lock in client storage and UI state
-      if (typeof window !== "undefined") {
-        localStorage.setItem(
-          `apex_locked_roster_${user.id}`,
-          JSON.stringify(newLocked)
-        );
-      }
-      applyLockedState(newLocked);
-      setPointsNotice(
-        "FANTASY TEAM LOCKED IN! EDITS ARE NOW DISABLED — USE 'RESET & NEW TEAM' TO START OVER (ERASES ALL POINTS)."
+      const { error } = await supabase.from("fantasy_rosters").upsert(
+        {
+          user_id: user.id,
+          driver_numbers: selectedDrivers,
+          constructor_ids: [selectedConstructor],
+          power_unit_id: selectedPowerUnit,
+          turbo_driver: turboDriver,
+          is_locked: true,
+          locked_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id" }
       );
 
-      // 2. Persist to Supabase in background (with graceful fallback if schema cache lags)
-      if (supabase) {
-        const { error } = await supabase.from("fantasy_rosters").upsert(
-          {
-            user_id: user.id,
-            driver_numbers: selectedDrivers,
-            constructor_ids: [selectedConstructor],
-            power_unit_id: selectedPowerUnit,
-            turbo_driver: turboDriver,
-            is_locked: true,
-            locked_at: new Date().toISOString(),
-          },
-          { onConflict: "user_id" }
+      if (error) {
+        setRosterError(
+          `SUPABASE DB SAVE ERROR: ${error.message.toUpperCase()} — RUN THE CLEAN FANTASY_ROSTERS SQL IN SUPABASE.`
         );
-
-        if (error) {
-          // Fallback upsert using core columns if PostgREST schema cache is still refreshing
-          await supabase.from("fantasy_rosters").upsert(
-            {
-              user_id: user.id,
-              driver_numbers: selectedDrivers,
-              constructor_ids: [selectedConstructor],
-              turbo_driver: turboDriver,
-            },
-            { onConflict: "user_id" }
-          );
-        }
+        setLockingRoster(false);
+        return;
       }
+
+      await loadFantasyData();
+      setPointsNotice(
+        "FANTASY TEAM SAVED & LOCKED IN DATABASE! SYNCED ACROSS ALL DEVICES."
+      );
     } finally {
       setLockingRoster(false);
     }
   };
 
+  // Full Fantasy Reset in Supabase DB (Erases all points + unlocks clean new team)
   const handleFullFantasyReset = async () => {
-    if (!user) return;
+    if (!user || !supabase) return;
     setLockingRoster(true);
     setRosterError(null);
     try {
+      const { error: delErr } = await supabase
+        .from("fantasy_rosters")
+        .delete()
+        .eq("user_id", user.id);
+
+      if (delErr) {
+        setRosterError(`SUPABASE RESET ERROR: ${delErr.message.toUpperCase()}`);
+        setLockingRoster(false);
+        return;
+      }
+
+      const { error: profErr } = await supabase
+        .from("fantasy_profiles")
+        .update({
+          total_points: 0,
+          scored_rounds: [],
+          updated_at: new Date().toISOString(),
+        })
+        .eq("user_id", user.id);
+
+      if (profErr) {
+        setRosterError(`POINTS RESET ERROR: ${profErr.message.toUpperCase()}`);
+        setLockingRoster(false);
+        return;
+      }
+
       if (typeof window !== "undefined") {
         localStorage.removeItem(`apex_locked_roster_${user.id}`);
       }
 
-      if (supabase) {
-        await supabase.from("fantasy_rosters").delete().eq("user_id", user.id);
-        await supabase
-          .from("fantasy_profiles")
-          .update({
-            total_points: 0,
-            scored_rounds: [],
-            updated_at: new Date().toISOString(),
-          })
-          .eq("user_id", user.id);
-      }
-
-      setLockedRoster(null);
-      setSelectedDrivers([]);
-      setSelectedConstructor(null);
-      setSelectedPowerUnit(null);
-      setTurboDriver(null);
       setShowResetConfirm(false);
+      onPointsUpdated?.(0);
       setPointsNotice(
-        "TEAM RESET COMPLETE. ALL POINTS ERASED (0 PTS) — DRAFT YOUR NEW LINEUP."
+        "TEAM RESET COMPLETE IN DATABASE. ALL POINTS ERASED (0 PTS) — DRAFT YOUR NEW LINEUP."
       );
       await loadFantasyData();
     } finally {
@@ -789,7 +788,7 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
       const updatedTotal = profile.totalPoints + totalEarned;
       const updatedRounds = [...profile.scoredRounds, roundKey];
 
-      await supabase
+      const { error } = await supabase
         .from("fantasy_profiles")
         .update({
           total_points: updatedTotal,
@@ -798,6 +797,13 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
         })
         .eq("user_id", user.id);
 
+      if (error) {
+        setRosterError(`POINTS SAVE ERROR: ${error.message.toUpperCase()}`);
+        setSyncingPoints(false);
+        return;
+      }
+
+      onPointsUpdated?.(updatedTotal);
       setPointsNotice(
         `+${totalEarned} PTS AWARDED FOR ${data.raceName.toUpperCase()} (DRIVERS +${earnedDrivers} • CONSTRUCTOR +${earnedConstructor} • POWER UNIT +${earnedPowerUnit})!`
       );
@@ -1205,7 +1211,7 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
                     </span>
                     <span className="font-mono-telemetry text-sm font-bold text-white">
                       {isLocked
-                        ? "LOCKED • NO CHANGES ALLOWED WITHOUT RESET"
+                        ? "LOCKED • SYNCED IN DATABASE"
                         : `${selectedDrivers.length}/3 DRIVERS • ${
                             selectedConstructor ? 1 : 0
                           }/1 CONSTRUCTOR • ${
@@ -1561,7 +1567,6 @@ export function RosterBuilder({ user }: RosterBuilderProps) {
                 </div>
               </div>
 
-              {/* Market Selection Grids: Strictly hidden once locked */}
               {!isLocked && (
                 <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.35fr_1fr]">
                   <div className="f1-hud-panel p-4">
